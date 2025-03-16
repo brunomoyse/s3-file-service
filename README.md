@@ -49,7 +49,7 @@ Start the server using:
 ```sh
 cargo run
 ```
-The service will be available at `http://127.0.0.1:8080`.
+The service will be available at `http://127.0.0.1:8000`.
 
 ## API Usage
 ### Upload Image
@@ -61,7 +61,7 @@ The service will be available at `http://127.0.0.1:8080`.
 
 #### Example cURL Request:
 ```sh
-curl -X POST "http://127.0.0.1:8080/upload" \
+curl -X POST "http://127.0.0.1:8000/upload" \
      -F "product_slug=my-product" \
      -F "image=@/path/to/image.jpg"
 ```
@@ -79,3 +79,8 @@ curl -X POST "http://127.0.0.1:8080/upload" \
 - Processes all image formats in a **single batch operation**.
 - Uploads to S3 **in parallel** using `tokio::spawn`.
 
+## Start with Docker
+```bash
+$ docker build -t s3-file-service .
+$ docker run --name s3-file-service --env-file .env -p 8000:8000 s3-file-service
+```
