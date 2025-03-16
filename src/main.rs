@@ -1,3 +1,4 @@
+// main.rs
 use actix_web::{App, HttpServer};
 use dotenv::dotenv;
 
@@ -8,9 +9,8 @@ mod image_processing;
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
-
     HttpServer::new(|| App::new().service(handlers::upload_image))
-        .bind("127.0.0.1:8080")?
+        .bind("127.0.0.1:8000")?
         .run()
         .await
 }
