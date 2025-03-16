@@ -1,8 +1,12 @@
-# Stage 1: Build stage
-FROM rust:1.84.1-alpine3.21 AS builder
+ARG AWS_ACCESS_KEY_ID
+ARG AWS_SECRET_ACCESS_KEY
+ARG AWS_S3_BUCKET_NAME
 
-# Install required dependencies
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+# Stage 1: Build stage
+FROM rust:1.85-alpine3.21 AS builder
+
+# Install required dependencies, including nasm
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig nasm
 
 # Create a new project directory
 WORKDIR /app
@@ -10,6 +14,10 @@ WORKDIR /app
 # Copy your source files
 COPY ./src ./src
 COPY Cargo.toml Cargo.lock ./
+
+ENV AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} \
+    AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \
+    AWS_S3_BUCKET_NAME=${AWS_S3_BUCKET_NAME}
 
 # Build the application
 RUN cargo build --release
