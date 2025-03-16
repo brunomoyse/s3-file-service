@@ -1,0 +1,22 @@
+[package]
+name = "file-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-multipart = "0.7.2"
+actix-web = "4.10.2"
+anyhow = "1.0.97"
+aws-config = { version = "1.6.0", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1.69.0"
+aws-sdk-s3 = "1.79.0"
+bytemuck = "1.22.0"
+bytes = "1.10.1"
+dotenv = "0.15.0"
+futures = "0.3.31"
+image = { version = "0.25.5", features = ["avif", "png", "webp"] }
+ravif = "0.11.11"
+rgb = "0.8.50"
+tokio = { version = "1", features = ["full"] }
+webp = "0.3.0"
+webp_encoder = "0.6.0"
