@@ -10,7 +10,7 @@ mod image_processing;
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
     HttpServer::new(|| App::new().service(handlers::upload_image))
-        .bind("127.0.0.1:8000")?
+        .bind("0.0.0.0:8000")?
         .run()
         .await
 }
