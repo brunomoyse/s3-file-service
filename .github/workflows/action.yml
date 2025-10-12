@@ -10,9 +10,16 @@ env:
   IMAGE_NAME: ${{ github.actor }}/s3-file-service:latest
 
 jobs:
-  build_and_publish:
-    name: Build and Publish Docker Image
-    runs-on: ubuntu-latest
+  build_and_push:
+    name: Build and Push Docker Image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: self-hosted
 
     steps:
       - name: Checkout Code
@@ -24,53 +31,73 @@ jobs:
       - name: Log in to GitHub Container Registry
         run: echo "${{ secrets.PAT }}" | docker login ${{ env.DOCKER_REGISTRY }} -u ${{ github.actor }} --password-stdin
 
-      - name: Build and Push Docker Image
+      - name: Build and Push Docker Image for ${{ matrix.arch }}
         run: |
-          docker build . --tag ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }} \
+          docker buildx build \
+            --platform linux/${{ matrix.arch }} \
+            --tag ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }} \
             --build-arg AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
             --build-arg AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
-            --build-arg AWS_S3_BUCKET_NAME=${{ secrets.AWS_S3_BUCKET_NAME }}
-          docker push ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
+            --build-arg AWS_S3_BUCKET_NAME=${{ secrets.AWS_S3_BUCKET_NAME }} \
+            --push \
+            .
 
-  deploy:
-    needs: build_and_publish
-    name: Deploy Docker Image to AWS
+  create_manifest:
+    name: Create Multi-Architecture Manifest
+    needs: build_and_push
     runs-on: ubuntu-latest
 
     steps:
-      - name: Create SSH Directory and Install Key
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.PAT }}" | docker login ${{ env.DOCKER_REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Create and Push Manifest
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/aws_key.pem
-          chmod 600 ~/.ssh/aws_key.pem
+          docker buildx imagetools create \
+            --tag ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }} \
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-amd64 \
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-arm64
 
-      - name: Add AWS Host to Known Hosts
-        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+# Commented out - AWS VPS deployment disabled
+  # deploy:
+  #   needs: build_and_publish
+  #   name: Deploy Docker Image to AWS
+  #   runs-on: ubuntu-latest
 
-      - name: Deploy to AWS Server
-        run: |
-          ssh -i ~/.ssh/aws_key.pem ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
-            set -e  # Stop on first error
-            echo "*** Logging into Docker Registry ***"
-            echo "${{ secrets.PAT }}" | docker login ${{ env.DOCKER_REGISTRY }} -u ${{ github.actor }} --password-stdin
-            
-            echo "*** Pulling the latest Docker image ***"
-            docker pull ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
+  #   steps:
+  #     - name: Create SSH Directory and Install Key
+  #       run: |
+  #         mkdir -p ~/.ssh
+  #         echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/aws_key.pem
+  #         chmod 600 ~/.ssh/aws_key.pem
 
-            echo "*** Checking if the target directory exists ***"
-            if [ ! -d "${{ secrets.WORK_DIR }}" ]; then
-              echo "Error: Directory ${{ secrets.WORK_DIR }} does not exist. Deployment aborted." >&2
-              exit 1
-            fi
+  #     - name: Add AWS Host to Known Hosts
+  #       run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
 
-            echo "*** Changing to target directory ***"
-            cd ${{ secrets.WORK_DIR }}
+  #     - name: Deploy to AWS Server
+  #       run: |
+  #         ssh -i ~/.ssh/aws_key.pem ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+  #           set -e  # Stop on first error
+  #           echo "*** Logging into Docker Registry ***"
+  #           echo "${{ secrets.PAT }}" | docker login ${{ env.DOCKER_REGISTRY }} -u ${{ github.actor }} --password-stdin
+  #
+  #           echo "*** Pulling the latest Docker image ***"
+  #           docker pull ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
 
-            echo "*** Running Docker Compose ***"
-            docker compose pull && docker compose up -d
+  #           echo "*** Checking if the target directory exists ***"
+  #           if [ ! -d "${{ secrets.WORK_DIR }}" ]; then
+  #             echo "Error: Directory ${{ secrets.WORK_DIR }} does not exist. Deployment aborted." >&2
+  #             exit 1
+  #           fi
 
-            echo "*** Deployment complete ***"
-          EOF
+  #           echo "*** Changing to target directory ***"
+  #           cd ${{ secrets.WORK_DIR }}
 
-      - name: Clean Up SSH Key
-        run: rm -f ~/.ssh/aws_key.pem
+  #           echo "*** Running Docker Compose ***"
+  #           docker compose pull && docker compose up -d
+
+  #           echo "*** Deployment complete ***"
+  #         EOF
+
+  #     - name: Clean Up SSH Key
+  #       run: rm -f ~/.ssh/aws_key.pem

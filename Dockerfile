@@ -3,7 +3,7 @@ ARG AWS_SECRET_ACCESS_KEY
 ARG AWS_S3_BUCKET_NAME
 
 # Stage 1: Build stage
-FROM rust:1.85-alpine3.21 AS builder
+FROM rust:1.90-alpine3.22 AS builder
 
 # Install required dependencies, including nasm
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig nasm
@@ -23,7 +23,7 @@ ENV AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} \
 RUN cargo build --release
 
 # Stage 2: Runtime stage
-FROM alpine:3.21
+FROM alpine:3.22
 
 # Install only necessary runtime dependencies
 RUN apk add --no-cache ca-certificates
