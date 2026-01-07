@@ -16,7 +16,7 @@ dotenv = "0.15.0"
 futures = "0.3.31"
 image = { version = "0.25.5", features = ["avif", "png", "webp"] }
 ravif = "0.11.11"
-rgb = "0.8.50"
+rgb = "0.8.52"
 tokio = { version = "1", features = ["full"] }
 webp = "0.3.0"
 webp_encoder = "0.6.0"
