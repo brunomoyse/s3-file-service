@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 actix-multipart = "0.7.2"
-actix-web = "4.10.2"
+actix-web = "4.12.1"
 anyhow = "1.0.100"
 aws-config = { version = "1.6.0", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1.69.0"
