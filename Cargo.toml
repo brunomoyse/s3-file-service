@@ -18,5 +18,5 @@ image = { version = "0.25.9", features = ["avif", "png", "webp"] }
 ravif = "0.11.11"
 rgb = "0.8.52"
 tokio = { version = "1", features = ["full"] }
-webp = "0.3.0"
+webp = "0.3.1"
 webp_encoder = "0.6.0"
