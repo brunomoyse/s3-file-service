@@ -1,12 +1,15 @@
-use crate::aws;
 use crate::image_processing;
+use crate::s3;
+use crate::AppState;
 use actix_multipart::Multipart;
 use actix_web::{Error as ActixError, HttpResponse, post, web};
 use futures::{StreamExt, TryStreamExt, try_join};
-use std::env;
 
 #[post("/upload")]
-pub async fn upload_image(mut payload: Multipart) -> Result<HttpResponse, ActixError> {
+pub async fn upload_image(
+    state: web::Data<AppState>,
+    mut payload: Multipart,
+) -> Result<HttpResponse, ActixError> {
     let mut product_slug = String::new();
     let mut image_data = Vec::new();
 
@@ -33,9 +36,8 @@ pub async fn upload_image(mut payload: Multipart) -> Result<HttpResponse, ActixE
         return Ok(HttpResponse::BadRequest().body("Missing product_slug or image"));
     }
 
-    let bucket =
-        env::var("AWS_S3_BUCKET_NAME").map_err(actix_web::error::ErrorInternalServerError)?;
-    let s3_client = aws::init_s3_client().await;
+    let bucket = state.s3_bucket.clone();
+    let s3_client = state.s3_client.clone();
 
     let image_data_clone = image_data.clone();
     let (resized_normal, resized_thumb) = try_join!(
@@ -67,7 +69,7 @@ pub async fn upload_image(mut payload: Multipart) -> Result<HttpResponse, ActixE
             .await?
             .map_err(actix_web::error::ErrorInternalServerError)?;
 
-            aws::upload_file(&s3, &bucket, &format!("images/{}.{}", slug, fmt), data)
+            s3::upload_file(&s3, &bucket, &format!("images/{}.{}", slug, fmt), data)
                 .await
                 .map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string()))?;
 
@@ -81,7 +83,7 @@ pub async fn upload_image(mut payload: Multipart) -> Result<HttpResponse, ActixE
             .await?
             .map_err(actix_web::error::ErrorInternalServerError)?;
 
-            aws::upload_file(
+            s3::upload_file(
                 &s3,
                 &bucket,
                 &format!("images/thumbnails/{}.{}", slug, fmt),
