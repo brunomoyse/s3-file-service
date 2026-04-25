@@ -8,6 +8,7 @@ on:
 env:
   DOCKER_REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.actor }}/s3-file-service:latest
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build_and_push:
