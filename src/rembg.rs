@@ -8,10 +8,14 @@ pub async fn remove_background(
     rembg_url: &str,
     image_data: Vec<u8>,
 ) -> anyhow::Result<Vec<u8>> {
+    let part = reqwest::multipart::Part::bytes(image_data)
+        .file_name("image.png")
+        .mime_str("image/png")?;
+    let form = reqwest::multipart::Form::new().part("file", part);
+
     let response = client
         .post(format!("{}/api/remove", rembg_url))
-        .header("Content-Type", "image/png")
-        .body(image_data)
+        .multipart(form)
         .send()
         .await?;
 
