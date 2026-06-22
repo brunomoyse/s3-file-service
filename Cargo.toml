@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-actix-multipart = "0.7.2"
+actix-multipart = "0.8.0"
 actix-web = "4.13.0"
 anyhow = "1.0.102"
 aws-config = { version = "1.6.0", features = ["behavior-version-latest"] }
