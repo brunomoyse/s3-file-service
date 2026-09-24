@@ -5,7 +5,7 @@ ARG S3_BUCKET_NAME
 ARG S3_REGION
 
 # Stage 1: Build stage
-FROM rust:1.95-alpine3.23 AS builder
+FROM rust:1.98-alpine3.24 AS builder
 
 # Install required dependencies, including nasm
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig nasm
@@ -27,7 +27,7 @@ ENV S3_PROVIDER=${S3_PROVIDER} \
 RUN cargo build --release
 
 # Stage 2: Runtime stage
-FROM alpine:3.23
+FROM alpine:3.24
 
 # Install only necessary runtime dependencies
 RUN apk add --no-cache ca-certificates
