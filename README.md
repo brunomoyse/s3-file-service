@@ -1,86 +1,105 @@
-# Image Processing and S3 Uploader
+# S3 File Service
 
-## Overview
-This project is a Rust-based web service that processes uploaded images, generates PNG, WebP, and AVIF versions in both regular and thumbnail sizes, and uploads them to an Amazon S3 bucket. The service is built using **Actix Web** and utilizes **webp**, **ravif**, and **image** crates for image processing.
+A Rust web service that turns uploaded product images into PNG, WebP and AVIF variants and stores them on S3. It can also remove image backgrounds through a [rembg](https://github.com/danielgatis/rembg) sidecar.
 
-## Features
-- Accepts image uploads via an HTTP endpoint.
-- Resizes images to **600px width** (regular) and **350px width** (thumbnail).
-- Converts images to **PNG, WebP, and AVIF** formats.
-- Uploads processed images to an **AWS S3 bucket**.
-- Optimized for performance with parallel processing.
+Every stored image produces six objects, in each of the three formats:
 
-## Tech Stack
-- **Rust** (safe and performant backend)
-- **Actix Web** (handling HTTP requests)
-- **Tokio** (asynchronous execution)
-- **Image Processing:**
-  - `image` crate (resizing, PNG encoding)
-  - `webp` crate (WebP encoding)
-  - `ravif` crate (AVIF encoding)
-- **AWS SDK for Rust** (uploading to S3)
-- **dotenv** (loading environment variables)
+| Variant | Width | Key |
+|---|---|---|
+| Regular | 600px | `images/{product_slug}.{avif,webp,png}` |
+| Thumbnail | 350px | `images/thumbnails/{product_slug}.{avif,webp,png}` |
 
-## Installation
-1. Clone the repository:
-   ```sh
-   git clone https://github.com/yourusername/your-repo.git
-   cd your-repo
-   ```
-2. Install Rust (if not installed):
-   ```sh
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
-3. Install dependencies:
-   ```sh
-   cargo build
-   ```
+## API
+
+The server listens on port 8000. All routes take `multipart/form-data`.
+
+### `POST /upload`
+
+Stores the variants of an image as is.
+
+| Field | Type | Required |
+|---|---|---|
+| `product_slug` | text | yes |
+| `image` | file | yes |
+
+Responds with `200` and the text `Images uploaded successfully`.
+
+```sh
+curl -F product_slug=my-product -F image=@image.jpg http://127.0.0.1:8000/upload
+```
+
+### `POST /images/upload/processed`
+
+Removes the background, trims transparent borders, then stores the variants. It takes the same fields as `/upload` and responds with JSON:
+
+```json
+{
+  "status": "ok",
+  "original_dimensions": { "width": 1200, "height": 800 },
+  "post_rembg_dimensions": { "width": 1200, "height": 800 },
+  "post_trim_dimensions": { "width": 900, "height": 640 },
+  "trim_applied": true,
+  "upload_to_s3": true
+}
+```
+
+### `POST /images/preview/processed`
+
+Runs the same pipeline without storing anything. It only needs the `image` field and responds with the resulting PNG, plus these headers:
+
+- `X-Original-Width`, `X-Original-Height`
+- `X-Post-Rembg-Width`, `X-Post-Rembg-Height`
+- `X-Post-Trim-Width`, `X-Post-Trim-Height`
+- `X-Trim-Applied`
+
+### Errors
+
+| Status | Meaning |
+|---|---|
+| `400` | A required field is missing, or a processed route received an undecodable image |
+| `500` | Decoding, encoding, rembg or S3 failed. `/upload` also answers this for an undecodable image |
+| `503` | A processed route was called but `REMBG_URL` is not set |
 
 ## Configuration
-Set up a `.env` file in the project root with the following environment variables:
-```env
-AWS_ACCESS_KEY_ID=your_access_key_id
-AWS_SECRET_ACCESS_KEY=your_secret_access_key
-AWS_S3_BUCKET_NAME=your_s3_bucket
-```
 
-## Running the Service
-Start the server using:
+Set these as environment variables, or copy `.env.example` to `.env` for local runs.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `S3_ACCESS_KEY_ID` | yes | | Access key |
+| `S3_SECRET_ACCESS_KEY` | yes | | Secret key |
+| `S3_BUCKET_NAME` | yes | | Target bucket |
+| `S3_PROVIDER` | no | `aws` | `ovh` selects the OVH defaults, anything else means AWS |
+| `S3_REGION` | no | `eu-west-3` (AWS), `gra` (OVH) | Bucket region |
+| `S3_ENDPOINT_URL` | no | AWS endpoint, `https://s3.{region}.io.cloud.ovh.net` (OVH) | Custom S3 endpoint |
+| `S3_FORCE_PATH_STYLE` | no | `false` (AWS), `true` (OVH) | `true` for path-style bucket addressing |
+| `REMBG_URL` | no | | Base URL of the rembg sidecar, required by the processed routes |
+| `IMAGE_TRIM_TRANSPARENT` | no | `true` | `false` turns off border trimming |
+| `RUST_LOG` | no | `info` | Log filter |
+
+## Development
+
+Requires Rust 1.99 or later, plus `nasm` and a C compiler for the image and TLS libraries.
+
 ```sh
 cargo run
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 ```
-The service will be available at `http://127.0.0.1:8000`.
 
-## API Usage
-### Upload Image
-- **Endpoint:** `POST /upload`
-- **Request Type:** `multipart/form-data`
-- **Required Fields:**
-  - `product_slug`: (string) Slug identifier for the product
-  - `image`: (file) Image file to be processed
+The tests mock S3 and rembg, so they need no credentials or network access.
 
-#### Example cURL Request:
+## Docker
+
 ```sh
-curl -X POST "http://127.0.0.1:8000/upload" \
-     -F "product_slug=my-product" \
-     -F "image=@/path/to/image.jpg"
+docker build -t s3-file-service .
+docker run --env-file .env -p 8000:8000 s3-file-service
 ```
 
-### Expected Behavior
-- The image is resized to **600px (regular) and 350px (thumbnail)**.
-- The image is converted to **PNG, WebP, and AVIF** formats.
-- All versions are uploaded to an **S3 bucket** under:
-  - `images/{product_slug}.{format}`
-  - `images/thumbnails/{product_slug}.{format}`
-- Returns a success message upon completion.
+## Releases
 
-## Performance Optimizations
-- Uses **web::block** for CPU-bound image processing.
-- Processes all image formats in a **single batch operation**.
-- Uploads to S3 **in parallel** using `tokio::spawn`.
+CI runs on every pull request and push, and also verifies that the image builds for `amd64` and `arm64`. Images go to `ghcr.io/brunomoyse/s3-file-service`:
 
-## Start with Docker
-```bash
-$ docker build -t s3-file-service .
-$ docker run --name s3-file-service --env-file .env -p 8000:8000 s3-file-service
-```
+- A push to `main` publishes `:latest`.
+- A `v*` tag publishes that version, for example `:v1.0.0`.
