@@ -1,28 +1,78 @@
 [package]
 name = "s3-file-service"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.99"
+description = "Processes product images into PNG, WebP and AVIF variants and stores them on S3"
+repository = "https://github.com/brunomoyse/s3-file-service"
+publish = false
 
 [dependencies]
-actix-multipart = "0.8.4"
-actix-web = "4.15.0"
+actix-multipart = "0.8.5"
+# Default features minus `http2`, `ws`, `cookies`: the server only binds plain HTTP/1.1.
+actix-web = { version = "4.18.1", default-features = false, features = ["compat", "compress-brotli", "compress-gzip", "compress-zstd", "macros", "unicode"] }
 anyhow = "1.0.104"
-aws-config = { version = "1.12.0", features = ["behavior-version-latest"] }
-aws-sdk-dynamodb = "1.127.0"
-aws-sdk-s3 = "1.149.0"
-bytemuck = "1.25.2"
+# Default features minus `rustls`, the legacy rustls 0.21 stack with open advisories.
+aws-sdk-s3 = { version = "1.157.0", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
 bytes = "1.12.1"
-dotenv = "0.15.0"
+dotenvy = "0.15.7"
 futures = "0.3.34"
 image = { version = "0.25.10", features = ["avif", "png", "webp"] }
 ravif = "0.13.0"
-rgb = "0.8.53"
-tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "multipart"] }
+rgb = "0.8.53"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+tracing = "0.1"
+# Default features minus `ansi`: logs go to container stdout, not a terminal.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "smallvec", "tracing-log"] }
 webp = "0.3.1"
-webp_encoder = "0.6.0"
 
 [dev-dependencies]
+serde_json = "1"
 wiremock = "0.6"
+
+# BeautifulRust lint set (https://github.com/morganlinton/BeautifulRust), minus the entries it
+# marks as library-only. CI runs clippy with -D warnings.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+unwrap_used = "warn"
+expect_used = "allow"
+panic_in_result_fn = "warn"
+missing_assert_message = "warn"
+
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+
+fn_params_excessive_bools = "warn"
+struct_excessive_bools = "warn"
+clone_on_ref_ptr = "warn"
+redundant_clone = "warn"
+rc_buffer = "warn"
+
+string_add = "warn"
+wildcard_imports = "warn"
+
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+as_conversions = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+module_inception = "allow"
+enum_glob_use = "allow"

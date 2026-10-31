@@ -1,192 +1,280 @@
-// image_processing.rs
-use image::{DynamicImage, GenericImageView, ImageError, ImageFormat, imageops::FilterType};
-use ravif::{Encoder, Img};
-use std::io::Cursor;
+//! Decoding, resizing, trimming and encoding of product images.
+
+use std::io::{self, Cursor};
+
+use image::imageops::{self, FilterType};
+use image::{DynamicImage, GenericImageView, ImageError, ImageFormat, RgbaImage};
+use ravif::{Encoder as AvifEncoder, Img};
+use rgb::FromSlice;
+use serde::Serialize;
 use webp::Encoder as WebpEncoder;
 
-// ---- Error type ----
+/// Lossy quality for WebP and AVIF, on their 0-100 scale.
+const LOSSY_QUALITY: f32 = 75.0;
 
-#[derive(Debug)]
-pub enum ImageProcessError {
-    ImageError(ImageError),
+/// `ravif` encoder effort, from 1 (slowest, smallest) to 10 (fastest, largest).
+const AVIF_SPEED: u8 = 6;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct Dimensions {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
-impl std::fmt::Display for ImageProcessError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum OutputFormat {
+    Avif,
+    Webp,
+    Png,
+}
+
+impl OutputFormat {
+    pub(crate) const ALL: [Self; 3] = [Self::Avif, Self::Webp, Self::Png];
+
+    pub(crate) fn extension(self) -> &'static str {
         match self {
-            ImageProcessError::ImageError(e) => write!(f, "{}", e),
+            Self::Avif => "avif",
+            Self::Webp => "webp",
+            Self::Png => "png",
+        }
+    }
+
+    pub(crate) fn encode(self, image: &DynamicImage) -> Result<Vec<u8>, ImageError> {
+        match self {
+            Self::Avif => encode_to_avif(image),
+            Self::Webp => Ok(encode_to_webp(image)),
+            Self::Png => encode_to_png(image),
         }
     }
 }
 
-impl std::error::Error for ImageProcessError {}
+/// Decodes `data` and scales it to `width`, keeping the aspect ratio.
+pub(crate) fn resize_image(data: &[u8], width: u32) -> Result<DynamicImage, ImageError> {
+    let image = image::load_from_memory(data)?;
+    let (original_width, original_height) = image.dimensions();
+    let height = scaled_height(width, original_width, original_height);
+    Ok(image.resize_exact(width, height, FilterType::Lanczos3))
+}
 
-impl From<ImageError> for ImageProcessError {
-    fn from(e: ImageError) -> Self {
-        ImageProcessError::ImageError(e)
+/// Rounds to the nearest pixel, but never below one so that very wide images stay encodable.
+fn scaled_height(width: u32, original_width: u32, original_height: u32) -> u32 {
+    let original_width = u64::from(original_width);
+    let exact = u64::from(width) * u64::from(original_height);
+    let rounded = (exact + original_width / 2) / original_width;
+    u32::try_from(rounded).unwrap_or(u32::MAX).max(1)
+}
+
+fn encode_to_png(image: &DynamicImage) -> Result<Vec<u8>, ImageError> {
+    let mut buffer = Cursor::new(Vec::new());
+    image.write_to(&mut buffer, ImageFormat::Png)?;
+    Ok(buffer.into_inner())
+}
+
+fn encode_to_webp(image: &DynamicImage) -> Vec<u8> {
+    let rgba = image.to_rgba8();
+    WebpEncoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
+        .encode(LOSSY_QUALITY)
+        .to_vec()
+}
+
+fn encode_to_avif(image: &DynamicImage) -> Result<Vec<u8>, ImageError> {
+    let rgba = image.to_rgba8();
+    let pixels = Img::new(
+        rgba.as_raw().as_rgba(),
+        to_usize(rgba.width()),
+        to_usize(rgba.height()),
+    );
+    AvifEncoder::new()
+        .with_quality(LOSSY_QUALITY)
+        .with_speed(AVIF_SPEED)
+        .encode_rgba(pixels)
+        .map(|encoded| encoded.avif_file)
+        .map_err(|error| ImageError::IoError(io::Error::other(error)))
+}
+
+fn to_usize(value: u32) -> usize {
+    usize::try_from(value).expect("u32 fits in usize on every supported target")
+}
+
+/// Reads the size of an encoded image, fully decoding it so that corrupt data is rejected.
+pub(crate) fn dimensions(data: &[u8]) -> Result<Dimensions, ImageError> {
+    let (width, height) = image::load_from_memory(data)?.dimensions();
+    Ok(Dimensions { width, height })
+}
+
+/// Crops the fully transparent rows and columns around an image's visible pixels.
+///
+/// The input comes back untouched when it has no such border or no visible pixel at all.
+/// A cropped result is always a PNG.
+pub(crate) fn trim_transparent_borders(data: Vec<u8>) -> Result<Vec<u8>, ImageError> {
+    let image = image::load_from_memory(&data)?.to_rgba8();
+    let Some(bounds) = visible_bounds(&image) else {
+        return Ok(data);
+    };
+    if bounds.width == image.width() && bounds.height == image.height() {
+        return Ok(data);
     }
+
+    let cropped =
+        imageops::crop_imm(&image, bounds.left, bounds.top, bounds.width, bounds.height).to_image();
+    encode_to_png(&DynamicImage::ImageRgba8(cropped))
 }
 
-// ---- Existing functions (unchanged) ----
-
-pub fn resize_image(data: &[u8], width: u32) -> Result<DynamicImage, image::ImageError> {
-    let img = image::load_from_memory(data)?;
-    let (orig_w, orig_h) = img.dimensions();
-    let height = (width as f32 * orig_h as f32 / orig_w as f32).round() as u32;
-    Ok(img.resize_exact(width, height, FilterType::Lanczos3))
+struct Bounds {
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
 }
 
-pub fn encode_to_png(img: &DynamicImage) -> Result<Vec<u8>, image::ImageError> {
-    let mut buf = Cursor::new(Vec::new());
-    img.write_to(&mut buf, ImageFormat::Png)?;
-    Ok(buf.into_inner())
+fn visible_bounds(image: &RgbaImage) -> Option<Bounds> {
+    let (left, top, right, bottom) = image
+        .enumerate_pixels()
+        .filter(|(_, _, pixel)| pixel.0[3] > 0)
+        .fold(None, |extent, (x, y, _)| match extent {
+            None => Some((x, y, x, y)),
+            Some((left, top, right, bottom)) => {
+                Some((x.min(left), y.min(top), x.max(right), y.max(bottom)))
+            }
+        })?;
+    Some(Bounds {
+        left,
+        top,
+        width: right - left + 1,
+        height: bottom - top + 1,
+    })
 }
 
-pub fn encode_to_webp(img: &DynamicImage, quality: f32) -> Result<Vec<u8>, image::ImageError> {
-    let rgba = img.to_rgba8();
-    let (w, h) = rgba.dimensions();
-    Ok(WebpEncoder::from_rgba(rgba.as_raw(), w, h)
-        .encode(quality)
-        .to_vec())
-}
+#[cfg(test)]
+mod tests {
+    use image::Rgba;
 
-pub fn encode_to_avif(img: &DynamicImage, quality: f32) -> Result<Vec<u8>, ImageError> {
-    let rgba = img.to_rgba8();
-    let (w, h) = rgba.dimensions();
-    let img = Img::new(bytemuck::cast_slice(rgba.as_raw()), w as usize, h as usize);
-    Encoder::new()
-        .with_quality(quality)
-        .with_speed(6)
-        .encode_rgba(img)
-        .map(|res| res.avif_file)
-        .map_err(|e| image::ImageError::IoError(std::io::Error::other(e)))
-}
+    use super::*;
 
-// ---- New utilities ----
+    const OPAQUE: Rgba<u8> = Rgba([200, 100, 50, 255]);
+    const CLEAR: Rgba<u8> = Rgba([0, 0, 0, 0]);
 
-/// Returns (width, height) from raw image bytes without fully decoding.
-pub fn image_dimensions(data: &[u8]) -> Result<(u32, u32), ImageError> {
-    Ok(image::load_from_memory(data)?.dimensions())
-}
+    fn png_from(image: RgbaImage) -> Vec<u8> {
+        encode_to_png(&DynamicImage::ImageRgba8(image)).unwrap()
+    }
 
-/// Crops transparent border rows/columns from a PNG.
-/// - Preserves alpha channel.
-/// - Fully transparent image: returns unchanged bytes, no panic.
-/// - No transparent border: returns unchanged bytes.
-pub fn trim_transparent_borders(png_bytes: &[u8]) -> Result<Vec<u8>, ImageProcessError> {
-    let img = image::load_from_memory(png_bytes)?.to_rgba8();
-    let (width, height) = img.dimensions();
+    fn decoded_dimensions(data: &[u8]) -> (u32, u32) {
+        image::load_from_memory(data).unwrap().dimensions()
+    }
 
-    let mut min_x = width;
-    let mut min_y = height;
-    let mut max_x = 0u32;
-    let mut max_y = 0u32;
-    let mut found = false;
+    #[test]
+    fn scaled_height_keeps_the_aspect_ratio() {
+        assert_eq!(scaled_height(600, 1000, 500), 300);
+        assert_eq!(scaled_height(350, 3, 2), 233);
+        assert_eq!(scaled_height(600, 20, 20), 600);
+    }
 
-    for (x, y, pixel) in img.enumerate_pixels() {
-        if pixel[3] > 0 {
-            if !found {
-                min_x = x;
-                max_x = x;
-                min_y = y;
-                max_y = y;
-                found = true;
-            } else {
-                if x < min_x {
-                    min_x = x;
-                }
-                if x > max_x {
-                    max_x = x;
-                }
-                if y < min_y {
-                    min_y = y;
-                }
-                if y > max_y {
-                    max_y = y;
-                }
+    #[test]
+    fn scaled_height_rounds_to_nearest() {
+        assert_eq!(scaled_height(3, 2, 1), 2, "1.5 rounds up");
+        assert_eq!(scaled_height(10, 3, 1), 3, "3.33 rounds down");
+    }
+
+    #[test]
+    fn scaled_height_never_reaches_zero() {
+        assert_eq!(scaled_height(350, 65_000, 1), 1);
+    }
+
+    #[test]
+    fn resize_handles_an_extremely_wide_image() {
+        let png = png_from(RgbaImage::from_pixel(4_000, 1, OPAQUE));
+
+        let resized = resize_image(&png, 350).unwrap();
+
+        assert_eq!(resized.dimensions(), (350, 1));
+    }
+
+    #[test]
+    fn resize_rejects_data_that_is_not_an_image() {
+        assert!(resize_image(b"not an image", 350).is_err());
+    }
+
+    #[test]
+    fn every_format_produces_a_decodable_image_of_the_same_size() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 8, OPAQUE));
+
+        for format in OutputFormat::ALL {
+            let encoded = format.encode(&image).unwrap();
+
+            let guessed = image::guess_format(&encoded).unwrap();
+            assert_eq!(
+                guessed.extensions_str().first().copied(),
+                Some(format.extension()),
+                "{format:?}"
+            );
+            // The `image` crate is built without an AVIF decoder.
+            if !matches!(format, OutputFormat::Avif) {
+                assert_eq!(decoded_dimensions(&encoded), (16, 8), "{format:?}");
             }
         }
     }
 
-    // Fully transparent: return original unchanged
-    if !found {
-        return Ok(png_bytes.to_vec());
-    }
+    #[test]
+    fn dimensions_reads_the_image_size() {
+        let png = png_from(RgbaImage::from_pixel(7, 3, OPAQUE));
 
-    // Bounding box already fills the whole image: nothing to trim
-    if min_x == 0 && min_y == 0 && max_x == width - 1 && max_y == height - 1 {
-        return Ok(png_bytes.to_vec());
-    }
-
-    let crop_w = max_x - min_x + 1;
-    let crop_h = max_y - min_y + 1;
-    let cropped =
-        image::imageops::crop_imm(&img, min_x, min_y, crop_w, crop_h).to_image();
-    encode_to_png(&DynamicImage::ImageRgba8(cropped)).map_err(Into::into)
-}
-
-// ---- Tests ----
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_rgba_png(width: u32, height: u32, pixels: Vec<[u8; 4]>) -> Vec<u8> {
-        assert_eq!(pixels.len() as u32, width * height);
-        let raw: Vec<u8> = pixels.into_iter().flatten().collect();
-        let img = image::RgbaImage::from_raw(width, height, raw).unwrap();
-        let mut buf = Cursor::new(Vec::new());
-        DynamicImage::ImageRgba8(img)
-            .write_to(&mut buf, ImageFormat::Png)
-            .unwrap();
-        buf.into_inner()
+        assert_eq!(
+            dimensions(&png).unwrap(),
+            Dimensions {
+                width: 7,
+                height: 3
+            }
+        );
     }
 
     #[test]
-    fn trim_no_border_returns_original_dimensions() {
-        // 3×3 fully opaque: bounding box == full image, should not crop
-        let png = make_rgba_png(3, 3, vec![[200, 100, 50, 255]; 9]);
-        let result = trim_transparent_borders(&png).unwrap();
-        let out = image::load_from_memory(&result).unwrap();
-        assert_eq!(out.dimensions(), (3, 3));
+    fn trim_returns_the_same_bytes_without_a_transparent_border() {
+        let png = png_from(RgbaImage::from_pixel(3, 3, OPAQUE));
+
+        assert_eq!(trim_transparent_borders(png.clone()).unwrap(), png);
     }
 
     #[test]
-    fn trim_transparent_border_crops_to_content() {
-        // 5×5: only the center pixel (2,2) is opaque
-        let mut pixels = vec![[0u8, 0, 0, 0]; 25];
-        pixels[2 * 5 + 2] = [255, 0, 0, 255];
-        let png = make_rgba_png(5, 5, pixels);
-        let result = trim_transparent_borders(&png).unwrap();
-        let out = image::load_from_memory(&result).unwrap().to_rgba8();
-        assert_eq!(out.dimensions(), (1, 1));
-        // The sole pixel must retain the original color
-        assert_eq!(out.get_pixel(0, 0).0, [255, 0, 0, 255]);
+    fn trim_returns_the_same_bytes_when_fully_transparent() {
+        let png = png_from(RgbaImage::from_pixel(4, 4, CLEAR));
+
+        assert_eq!(trim_transparent_borders(png.clone()).unwrap(), png);
     }
 
     #[test]
-    fn trim_fully_transparent_returns_unchanged() {
-        // All transparent: must not panic and must return the original dimensions
-        let png = make_rgba_png(4, 4, vec![[0u8, 0, 0, 0]; 16]);
-        let result = trim_transparent_borders(&png).unwrap();
-        let out = image::load_from_memory(&result).unwrap();
-        assert_eq!(out.dimensions(), (4, 4));
+    fn trim_crops_to_the_visible_pixels_and_keeps_their_color() {
+        let mut image = RgbaImage::from_pixel(5, 5, CLEAR);
+        image.put_pixel(2, 2, Rgba([255, 0, 0, 255]));
+
+        let trimmed = trim_transparent_borders(png_from(image)).unwrap();
+
+        let trimmed = image::load_from_memory(&trimmed).unwrap().to_rgba8();
+        assert_eq!(trimmed.dimensions(), (1, 1));
+        assert_eq!(trimmed.get_pixel(0, 0), &Rgba([255, 0, 0, 255]));
     }
 
     #[test]
-    fn trim_partial_border_crops_correctly() {
-        // 4×4: top row and left column transparent, rest opaque
-        let mut pixels = vec![[200u8, 200, 200, 255]; 16];
-        for x in 0..4 {
-            pixels[x] = [0, 0, 0, 0]; // row 0
-        }
-        for y in 0..4 {
-            pixels[y * 4] = [0, 0, 0, 0]; // col 0
-        }
-        let png = make_rgba_png(4, 4, pixels);
-        let result = trim_transparent_borders(&png).unwrap();
-        let out = image::load_from_memory(&result).unwrap();
-        // Should be cropped to 3×3 (columns 1-3, rows 1-3)
-        assert_eq!(out.dimensions(), (3, 3));
+    fn trim_crops_a_border_on_only_some_sides() {
+        let image = RgbaImage::from_fn(4, 4, |x, y| if x == 0 || y == 0 { CLEAR } else { OPAQUE });
+
+        let trimmed = trim_transparent_borders(png_from(image)).unwrap();
+
+        assert_eq!(decoded_dimensions(&trimmed), (3, 3));
+    }
+
+    #[test]
+    fn trim_treats_partial_transparency_as_visible() {
+        let mut image = RgbaImage::from_pixel(3, 3, CLEAR);
+        image.put_pixel(0, 0, Rgba([0, 0, 0, 1]));
+        image.put_pixel(1, 1, OPAQUE);
+
+        let trimmed = trim_transparent_borders(png_from(image)).unwrap();
+
+        assert_eq!(decoded_dimensions(&trimmed), (2, 2));
+    }
+
+    #[test]
+    fn trim_rejects_data_that_is_not_an_image() {
+        assert!(trim_transparent_borders(b"not an image".to_vec()).is_err());
     }
 }

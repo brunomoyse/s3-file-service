@@ -1,38 +1,44 @@
-// main.rs
-use actix_web::{App, HttpServer, web};
-use aws_sdk_s3::Client;
-use dotenv::dotenv;
-use std::env;
+//! HTTP service that turns uploaded product images into PNG, WebP and AVIF variants on S3.
 
 mod handlers;
 mod image_processing;
 mod rembg;
 mod s3;
 
-pub struct AppState {
-    pub s3_client: Client,
-    pub s3_bucket: String,
-    pub rembg_url: Option<String>,
-    pub trim_transparent: bool,
-    pub http_client: reqwest::Client,
+use std::env;
+
+use actix_web::{App, HttpServer, web};
+use anyhow::Context;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
+
+const BIND_ADDRESS: &str = "0.0.0.0:8000";
+
+pub(crate) struct AppState {
+    pub(crate) s3_client: aws_sdk_s3::Client,
+    pub(crate) s3_bucket: String,
+    pub(crate) rembg_url: Option<String>,
+    pub(crate) trim_transparent: bool,
+    pub(crate) http_client: reqwest::Client,
 }
 
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    dotenv().ok();
-
-    let s3_client = s3::init_s3_client().await;
-    let s3_bucket = env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
-    let rembg_url = env::var("REMBG_URL").ok();
-    let trim_transparent = env::var("IMAGE_TRIM_TRANSPARENT")
-        .map(|v| v != "false")
-        .unwrap_or(true);
+async fn main() -> anyhow::Result<()> {
+    // The file is a local convenience: deployed instances get real environment variables.
+    dotenvy::dotenv().ok();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
 
     let app_state = web::Data::new(AppState {
-        s3_client,
-        s3_bucket,
-        rembg_url,
-        trim_transparent,
+        s3_client: s3::Settings::from_env()?.into_client(),
+        s3_bucket: env::var("S3_BUCKET_NAME").context("S3_BUCKET_NAME must be set")?,
+        rembg_url: env::var("REMBG_URL").ok(),
+        trim_transparent: env::var("IMAGE_TRIM_TRANSPARENT").map_or(true, |value| value != "false"),
         http_client: reqwest::Client::new(),
     });
 
@@ -43,7 +49,9 @@ async fn main() -> std::io::Result<()> {
             .service(handlers::upload_processed_image)
             .service(handlers::preview_processed_image)
     })
-    .bind("0.0.0.0:8000")?
+    .bind(BIND_ADDRESS)
+    .with_context(|| format!("binding {BIND_ADDRESS}"))?
     .run()
     .await
+    .context("running the HTTP server")
 }
