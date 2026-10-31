@@ -4,6 +4,7 @@ mod handlers;
 mod image_processing;
 mod rembg;
 mod s3;
+mod slug;
 
 use std::env;
 
@@ -48,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
             .service(handlers::upload_image)
             .service(handlers::upload_processed_image)
             .service(handlers::preview_processed_image)
+            .service(handlers::delete_image)
     })
     .bind(BIND_ADDRESS)
     .with_context(|| format!("binding {BIND_ADDRESS}"))?

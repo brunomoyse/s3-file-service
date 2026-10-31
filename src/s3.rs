@@ -90,6 +90,20 @@ pub(crate) async fn upload_file(
     Ok(())
 }
 
+/// Deletes an object. S3 reports success whether or not the object existed.
+pub(crate) async fn delete_file(client: &Client, bucket: &str, key: &str) -> anyhow::Result<()> {
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .with_context(|| format!("deleting {key}"))?;
+
+    info!(key, "deleted object");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

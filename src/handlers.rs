@@ -1,11 +1,11 @@
-//! HTTP routes for uploading and previewing product images.
+//! HTTP routes for uploading, previewing and deleting product images.
 
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use actix_multipart::{Field, Multipart, MultipartError};
 use actix_web::error::{ErrorBadRequest, ErrorInternalServerError, ErrorServiceUnavailable};
-use actix_web::{Error, HttpResponse, post, web};
+use actix_web::{Error, HttpResponse, delete, post, web};
 use bytes::Bytes;
 use futures::{TryStreamExt, future, try_join};
 use image::{DynamicImage, ImageError};
@@ -14,6 +14,7 @@ use tracing::{error, info};
 
 use crate::AppState;
 use crate::image_processing::{self, Dimensions, OutputFormat};
+use crate::slug::Slug;
 use crate::{rembg, s3};
 
 /// Width of the `images/{slug}.{ext}` variants, in pixels.
@@ -47,11 +48,12 @@ impl UploadForm {
         Ok(form)
     }
 
-    fn into_slug_and_image(self) -> Result<(String, Vec<u8>), Error> {
+    fn into_slug_and_image(self) -> Result<(Slug, Vec<u8>), Error> {
         if self.slug.is_empty() || self.image.is_empty() {
             return Err(ErrorBadRequest("Missing product_slug or image"));
         }
         let slug = String::from_utf8(self.slug).map_err(ErrorBadRequest)?;
+        let slug = Slug::try_from(slug).map_err(ErrorBadRequest)?;
         Ok((slug, self.image))
     }
 
@@ -71,8 +73,17 @@ async fn read_field(field: &mut Field) -> Result<Vec<u8>, MultipartError> {
     Ok(content)
 }
 
+/// The regular and thumbnail object keys of an image in one format.
+fn variant_keys(slug: &Slug, format: OutputFormat) -> [String; 2] {
+    let extension = format.extension();
+    [
+        format!("images/{slug}.{extension}"),
+        format!("images/thumbnails/{slug}.{extension}"),
+    ]
+}
+
 /// Resizes `image` to both widths, encodes each in every format and uploads all six variants.
-async fn store_variants(state: &AppState, slug: &str, image: Vec<u8>) -> Result<(), Error> {
+async fn store_variants(state: &AppState, slug: &Slug, image: Vec<u8>) -> Result<(), Error> {
     let image = Bytes::from(image);
     let thumbnail_source = image.clone();
     let (regular, thumbnail) = try_join!(
@@ -85,12 +96,10 @@ async fn store_variants(state: &AppState, slug: &str, image: Vec<u8>) -> Result<
     let uploads = OutputFormat::ALL.map(|format| {
         let regular = Arc::clone(&regular);
         let thumbnail = Arc::clone(&thumbnail);
-        let extension = format.extension();
+        let [regular_key, thumbnail_key] = variant_keys(slug, format);
         async move {
-            let key = format!("images/{slug}.{extension}");
-            encode_and_upload(state, &key, regular, format).await?;
-            let key = format!("images/thumbnails/{slug}.{extension}");
-            encode_and_upload(state, &key, thumbnail, format).await
+            encode_and_upload(state, &regular_key, regular, format).await?;
+            encode_and_upload(state, &thumbnail_key, thumbnail, format).await
         }
     });
     // Waits for every format even after a failure, so no upload is cancelled midway.
@@ -209,7 +218,7 @@ pub(crate) async fn upload_processed_image(
 
     let processed = remove_background_and_trim(&state, image).await?;
     store_variants(&state, &slug, processed.bytes).await?;
-    info!(slug, "stored processed image");
+    info!(%slug, "stored processed image");
 
     Ok(HttpResponse::Ok().json(ProcessedUploadResponse {
         status: "ok",
@@ -246,6 +255,32 @@ pub(crate) async fn preview_processed_image(
         .append_header(("X-Post-Trim-Height", processed.post_trim.height.to_string()))
         .append_header(("X-Trim-Applied", processed.trim_applied.to_string()))
         .body(processed.bytes))
+}
+
+/// `DELETE /delete/{slug}`: deletes all six variants. Variants that don't exist are not an
+/// error, so a failed call can simply be retried.
+#[delete("/delete/{slug}")]
+pub(crate) async fn delete_image(
+    state: web::Data<AppState>,
+    slug: web::Path<String>,
+) -> Result<HttpResponse, Error> {
+    let slug = Slug::try_from(slug.into_inner()).map_err(ErrorBadRequest)?;
+
+    let keys: Vec<String> = OutputFormat::ALL
+        .into_iter()
+        .flat_map(|format| variant_keys(&slug, format))
+        .collect();
+    let deletions = keys
+        .iter()
+        .map(|key| s3::delete_file(&state.s3_client, &state.s3_bucket, key));
+    // Waits for every key even after a failure, so as many variants as possible are removed.
+    future::join_all(deletions)
+        .await
+        .into_iter()
+        .collect::<anyhow::Result<()>>()
+        .map_err(internal)?;
+
+    Ok(HttpResponse::NoContent().finish())
 }
 
 #[cfg(test)]
@@ -327,24 +362,42 @@ mod tests {
         }
     }
 
-    async fn post_multipart(state: AppState, uri: &str, body: Vec<u8>) -> ServiceResponse {
+    async fn send(state: AppState, request: test::TestRequest) -> ServiceResponse {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(state))
                 .service(upload_image)
                 .service(upload_processed_image)
-                .service(preview_processed_image),
+                .service(preview_processed_image)
+                .service(delete_image),
         )
         .await;
+        test::call_service(&app, request.to_request()).await
+    }
+
+    async fn post_multipart(state: AppState, uri: &str, body: Vec<u8>) -> ServiceResponse {
         let request = test::TestRequest::post()
             .uri(uri)
             .insert_header((
                 CONTENT_TYPE,
                 format!("multipart/form-data; boundary={BOUNDARY}"),
             ))
-            .set_payload(body)
-            .to_request();
-        test::call_service(&app, request).await
+            .set_payload(body);
+        send(state, request).await
+    }
+
+    async fn delete_request(state: AppState, uri: &str) -> ServiceResponse {
+        send(state, test::TestRequest::delete().uri(uri)).await
+    }
+
+    async fn mock_s3_delete(status: u16, expected_calls: u64) -> MockServer {
+        let s3 = MockServer::start().await;
+        Mock::given(matchers::method("DELETE"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(expected_calls)
+            .mount(&s3)
+            .await;
+        s3
     }
 
     async fn mock_s3(expected_puts: u64) -> MockServer {
@@ -374,7 +427,7 @@ mod tests {
             .insert_header("Content-Type", "image/png")
     }
 
-    async fn stored_keys(s3: &MockServer) -> Vec<String> {
+    async fn requested_keys(s3: &MockServer) -> Vec<String> {
         let mut keys: Vec<String> = s3
             .received_requests()
             .await
@@ -416,7 +469,7 @@ mod tests {
             test::read_body(response).await,
             "Images uploaded successfully"
         );
-        assert_eq!(stored_keys(&s3).await, all_variant_keys("my-product"));
+        assert_eq!(requested_keys(&s3).await, all_variant_keys("my-product"));
     }
 
     #[actix_web::test]
@@ -437,6 +490,75 @@ mod tests {
                 "Missing product_slug or image"
             );
         }
+    }
+
+    #[actix_web::test]
+    async fn upload_routes_reject_an_invalid_slug_before_doing_any_work() {
+        let image = opaque_png(10, 10);
+        for slug in ["../evil", "Upper-Case", "with space", "trailing-"] {
+            for uri in ["/upload", "/images/upload/processed"] {
+                let s3 = mock_s3(0).await;
+                let rembg = mock_rembg(png_response(cutout_png()), 0).await;
+                let body = multipart_body(Some(slug), Some(&image));
+
+                let response = post_multipart(app_state(&s3, Some(&rembg)), uri, body).await;
+
+                assert_eq!(response.status(), 400, "{uri} {slug}");
+                assert_eq!(test::read_body(response).await, "invalid product slug");
+                rembg.verify().await;
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn preview_ignores_an_invalid_slug() {
+        let s3 = mock_s3(0).await;
+        let rembg = mock_rembg(png_response(cutout_png()), 1).await;
+        let body = multipart_body(Some("../evil"), Some(&opaque_png(10, 10)));
+
+        let response = post_multipart(
+            app_state(&s3, Some(&rembg)),
+            "/images/preview/processed",
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), 200);
+    }
+
+    #[actix_web::test]
+    async fn delete_removes_all_six_variants() {
+        let s3 = mock_s3_delete(204, 6).await;
+
+        let response = delete_request(app_state(&s3, None), "/delete/my-product").await;
+
+        assert_eq!(response.status(), 204);
+        assert_eq!(requested_keys(&s3).await, all_variant_keys("my-product"));
+    }
+
+    #[actix_web::test]
+    async fn delete_rejects_an_invalid_slug_without_calling_s3() {
+        for uri in [
+            "/delete/Upper-Case",
+            "/delete/..%2Fevil",
+            "/delete/trailing-",
+            "/delete/with%20space",
+        ] {
+            let s3 = mock_s3_delete(204, 0).await;
+
+            let response = delete_request(app_state(&s3, None), uri).await;
+
+            assert_eq!(response.status(), 400, "{uri}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn delete_attempts_every_variant_and_reports_an_s3_failure() {
+        let s3 = mock_s3_delete(403, 6).await;
+
+        let response = delete_request(app_state(&s3, None), "/delete/my-product").await;
+
+        assert_eq!(response.status(), 500);
     }
 
     #[actix_web::test]
@@ -490,7 +612,7 @@ mod tests {
                 "upload_to_s3": true,
             })
         );
-        assert_eq!(stored_keys(&s3).await, all_variant_keys("my-product"));
+        assert_eq!(requested_keys(&s3).await, all_variant_keys("my-product"));
         rembg.verify().await;
     }
 

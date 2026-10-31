@@ -11,7 +11,9 @@ Every stored image produces six objects, in each of the three formats:
 
 ## API
 
-The server listens on port 8000. All routes take `multipart/form-data`.
+The server listens on port 8000. It has no authentication, so keep it on a private network. The `POST` routes take `multipart/form-data`.
+
+A `product_slug` is lowercase letters and digits in groups joined by single hyphens, up to 128 characters, for example `california-roll-8`.
 
 ### `POST /upload`
 
@@ -52,12 +54,16 @@ Runs the same pipeline without storing anything. It only needs the `image` field
 - `X-Post-Trim-Width`, `X-Post-Trim-Height`
 - `X-Trim-Applied`
 
+### `DELETE /delete/{product_slug}`
+
+Deletes all six variants and responds with `204`. Variants that don't exist are not an error, so the call is safe to retry.
+
 ### Errors
 
 | Status | Meaning |
 |---|---|
-| `400` | A required field is missing, or a processed route received an undecodable image |
-| `500` | Decoding, encoding, rembg or S3 failed. `/upload` also answers this for an undecodable image |
+| `400` | A required field is missing, the slug is invalid, or a processed route received an undecodable image |
+| `500` | Decoding, encoding, rembg or S3 failed. `/upload` also answers this for an undecodable image. After a failed delete, some variants may already be gone |
 | `503` | A processed route was called but `REMBG_URL` is not set |
 
 ## Configuration
