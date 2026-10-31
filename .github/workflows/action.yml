@@ -1,106 +1,96 @@
-name: Publish and Deploy Docker Image
+name: CI and Docker Image
 
 on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: read
 
 env:
   DOCKER_REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.actor }}/s3-file-service:latest
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # `v1.2.3` on a tag push, `latest` on main
+  IMAGE: ghcr.io/${{ github.repository_owner }}/s3-file-service:${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+  RUST_TOOLCHAIN: 1.99.1
 
 jobs:
+  check:
+    name: Format, Lint and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install nasm
+        run: sudo apt-get update && sudo apt-get install --yes nasm
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Check Formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run Tests
+        run: cargo test --locked
+
   build_and_push:
     name: Build and Push Docker Image (${{ matrix.arch }})
+    needs: check
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - arch: arm64
-            runner: self-hosted
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
-        run: echo "${{ secrets.PAT }}" | docker login ${{ env.DOCKER_REGISTRY }} -u ${{ github.actor }} --password-stdin
+        if: github.event_name != 'pull_request'
+        env:
+          PAT: ${{ secrets.PAT }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$PAT" | docker login "$DOCKER_REGISTRY" -u "$ACTOR" --password-stdin
 
-      - name: Build and Push Docker Image for ${{ matrix.arch }}
-        run: |
-          docker buildx build \
-            --platform linux/${{ matrix.arch }} \
-            --tag ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }} \
-            --build-arg S3_PROVIDER=${{ secrets.S3_PROVIDER }} \
-            --build-arg S3_ACCESS_KEY_ID=${{ secrets.S3_ACCESS_KEY_ID }} \
-            --build-arg S3_SECRET_ACCESS_KEY=${{ secrets.S3_SECRET_ACCESS_KEY }} \
-            --build-arg S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }} \
-            --build-arg S3_REGION=${{ secrets.S3_REGION }} \
-            --push \
-            .
+      # Pull requests only verify that the image builds.
+      - name: Build Docker Image for ${{ matrix.arch }}
+        env:
+          ARCH: ${{ matrix.arch }}
+          OUTPUT: ${{ github.event_name == 'pull_request' && '--output=type=cacheonly' || '--push' }}
+        run: docker buildx build --platform "linux/$ARCH" --tag "$IMAGE-$ARCH" "$OUTPUT" .
 
   create_manifest:
     name: Create Multi-Architecture Manifest
+    if: github.event_name != 'pull_request'
     needs: build_and_push
     runs-on: ubuntu-latest
 
     steps:
       - name: Log in to GitHub Container Registry
-        run: echo "${{ secrets.PAT }}" | docker login ${{ env.DOCKER_REGISTRY }} -u ${{ github.actor }} --password-stdin
+        env:
+          PAT: ${{ secrets.PAT }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$PAT" | docker login "$DOCKER_REGISTRY" -u "$ACTOR" --password-stdin
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Create and Push Manifest
-        run: |
-          docker buildx imagetools create \
-            --tag ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }} \
-            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-amd64 \
-            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-arm64
-
-# Commented out - AWS VPS deployment disabled
-  # deploy:
-  #   needs: build_and_publish
-  #   name: Deploy Docker Image to AWS
-  #   runs-on: ubuntu-latest
-
-  #   steps:
-  #     - name: Create SSH Directory and Install Key
-  #       run: |
-  #         mkdir -p ~/.ssh
-  #         echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/aws_key.pem
-  #         chmod 600 ~/.ssh/aws_key.pem
-
-  #     - name: Add AWS Host to Known Hosts
-  #       run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
-
-  #     - name: Deploy to AWS Server
-  #       run: |
-  #         ssh -i ~/.ssh/aws_key.pem ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
-  #           set -e  # Stop on first error
-  #           echo "*** Logging into Docker Registry ***"
-  #           echo "${{ secrets.PAT }}" | docker login ${{ env.DOCKER_REGISTRY }} -u ${{ github.actor }} --password-stdin
-  #
-  #           echo "*** Pulling the latest Docker image ***"
-  #           docker pull ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
-
-  #           echo "*** Checking if the target directory exists ***"
-  #           if [ ! -d "${{ secrets.WORK_DIR }}" ]; then
-  #             echo "Error: Directory ${{ secrets.WORK_DIR }} does not exist. Deployment aborted." >&2
-  #             exit 1
-  #           fi
-
-  #           echo "*** Changing to target directory ***"
-  #           cd ${{ secrets.WORK_DIR }}
-
-  #           echo "*** Running Docker Compose ***"
-  #           docker compose pull && docker compose up -d
-
-  #           echo "*** Deployment complete ***"
-  #         EOF
-
-  #     - name: Clean Up SSH Key
-  #       run: rm -f ~/.ssh/aws_key.pem
+        run: docker buildx imagetools create --tag "$IMAGE" "$IMAGE-amd64" "$IMAGE-arm64"

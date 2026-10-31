@@ -1,30 +1,31 @@
-use anyhow::anyhow;
+//! Client for the rembg background-removal sidecar.
 
-/// Calls the rembg HTTP sidecar to remove the background from an image.
-/// Sends raw image bytes and expects a PNG with transparency in response.
-/// The sidecar must expose POST /api/remove (standard rembg server interface).
-pub async fn remove_background(
+use anyhow::{Context, ensure};
+use reqwest::multipart::{Form, Part};
+
+/// Asks the sidecar's `POST /api/remove` for a PNG of `image_data` with its background removed.
+pub(crate) async fn remove_background(
     client: &reqwest::Client,
     rembg_url: &str,
     image_data: Vec<u8>,
 ) -> anyhow::Result<Vec<u8>> {
-    let part = reqwest::multipart::Part::bytes(image_data)
+    let part = Part::bytes(image_data)
         .file_name("image.png")
         .mime_str("image/png")?;
-    let form = reqwest::multipart::Form::new().part("file", part);
 
     let response = client
-        .post(format!("{}/api/remove", rembg_url))
-        .multipart(form)
+        .post(format!("{rembg_url}/api/remove"))
+        .multipart(Form::new().part("file", part))
         .send()
-        .await?;
+        .await
+        .context("calling the rembg service")?;
 
-    if !response.status().is_success() {
-        return Err(anyhow!(
-            "rembg service returned HTTP {}",
-            response.status()
-        ));
-    }
+    let status = response.status();
+    ensure!(status.is_success(), "rembg service returned HTTP {status}");
 
-    Ok(response.bytes().await?.to_vec())
+    let body = response
+        .bytes()
+        .await
+        .context("reading the rembg response")?;
+    Ok(body.to_vec())
 }
