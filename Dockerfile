@@ -1,5 +1,5 @@
 # Stage 1: Build stage
-FROM rust:1.99.1-alpine3.24 AS builder
+FROM rust:1.100.0-alpine3.24 AS builder
 
 # nasm assembles the AVIF encoder and the TLS crypto library
 RUN apk add --no-cache musl-dev nasm
