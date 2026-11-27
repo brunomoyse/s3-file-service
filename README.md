@@ -2,7 +2,7 @@
 
 A Rust web service that turns uploaded product images into PNG, WebP and AVIF variants and stores them on S3. It can also remove image backgrounds through a [rembg](https://github.com/danielgatis/rembg) sidecar.
 
-Every stored image produces six objects, in each of the three formats:
+Every stored image produces six objects, in each of the three formats. Each object is stored with its `Content-Type` (`image/avif`, `image/webp`, `image/png`) and `Cache-Control: public, max-age=300`, since a new upload replaces it under the same key.
 
 | Variant | Width | Key |
 |---|---|---|
@@ -81,6 +81,7 @@ Set these as environment variables, or copy `.env.example` to `.env` for local r
 | `S3_FORCE_PATH_STYLE` | no | `false` (AWS), `true` (OVH) | `true` for path-style bucket addressing |
 | `REMBG_URL` | no | | Base URL of the rembg sidecar, required by the processed routes |
 | `IMAGE_TRIM_TRANSPARENT` | no | `true` | `false` turns off border trimming |
+| `CLOUDFRONT_DISTRIBUTION_ID` | no | | CloudFront distribution in front of the bucket. When set, every upload and delete invalidates `/images/{slug}.*` and `/images/thumbnails/{slug}.*`, signed with the `S3_*` key, which then needs `cloudfront:CreateInvalidation`. A failed invalidation is logged and does not fail the request |
 | `RUST_LOG` | no | `info` | Log filter |
 
 ## Development

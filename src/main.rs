@@ -1,5 +1,6 @@
 //! HTTP service that turns uploaded product images into PNG, WebP and AVIF variants on S3.
 
+mod cdn;
 mod handlers;
 mod image_processing;
 mod rembg;
@@ -21,6 +22,8 @@ pub(crate) struct AppState {
     pub(crate) rembg_url: Option<String>,
     pub(crate) trim_transparent: bool,
     pub(crate) http_client: reqwest::Client,
+    /// Set when `CLOUDFRONT_DISTRIBUTION_ID` is, to invalidate the CDN after uploads and deletes.
+    pub(crate) cdn: Option<cdn::Invalidator>,
 }
 
 #[actix_web::main]
@@ -41,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         rembg_url: env::var("REMBG_URL").ok(),
         trim_transparent: env::var("IMAGE_TRIM_TRANSPARENT").map_or(true, |value| value != "false"),
         http_client: reqwest::Client::new(),
+        cdn: cdn::Invalidator::from_env()?,
     });
 
     HttpServer::new(move || {

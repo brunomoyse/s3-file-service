@@ -1,6 +1,6 @@
 [package]
 name = "s3-file-service"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.99"
 description = "Processes product images into PNG, WebP and AVIF variants and stores them on S3"
@@ -12,6 +12,8 @@ actix-multipart = "0.8.5"
 # Default features minus `http2`, `ws`, `cookies`: the server only binds plain HTTP/1.1.
 actix-web = { version = "4.18.1", default-features = false, features = ["compat", "compress-brotli", "compress-gzip", "compress-zstd", "macros", "unicode"] }
 anyhow = "1.0.104"
+# Default features minus `rustls`, as for aws-sdk-s3. Invalidates the CDN after uploads and deletes.
+aws-sdk-cloudfront = { version = "1.148.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 # Default features minus `rustls`, the legacy rustls 0.21 stack with open advisories.
 aws-sdk-s3 = { version = "1.157.0", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
 bytes = "1.12.1"

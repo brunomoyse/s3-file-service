@@ -71,16 +71,25 @@ impl Settings {
     }
 }
 
+/// `Cache-Control` of every stored image. Images are replaced in place under the same key, so
+/// browsers and the CDN keep a copy for five minutes only. Uploads also invalidate the CDN when
+/// a distribution is configured, which leaves browsers as the only stale copies.
+pub(crate) const CACHE_CONTROL: &str = "public, max-age=300";
+
+/// Stores `data` under `key` with its `Content-Type` and [`CACHE_CONTROL`].
 pub(crate) async fn upload_file(
     client: &Client,
     bucket: &str,
     key: &str,
     data: Vec<u8>,
+    content_type: &str,
 ) -> anyhow::Result<()> {
     client
         .put_object()
         .bucket(bucket)
         .key(key)
+        .content_type(content_type)
+        .cache_control(CACHE_CONTROL)
         .body(ByteStream::from(data))
         .send()
         .await

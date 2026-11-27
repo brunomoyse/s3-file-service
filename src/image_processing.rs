@@ -39,6 +39,15 @@ impl OutputFormat {
         }
     }
 
+    /// The `Content-Type` the variant is stored and served with.
+    pub(crate) fn mime_type(self) -> &'static str {
+        match self {
+            Self::Avif => "image/avif",
+            Self::Webp => "image/webp",
+            Self::Png => "image/png",
+        }
+    }
+
     pub(crate) fn encode(self, image: &DynamicImage) -> Result<Vec<u8>, ImageError> {
         match self {
             Self::Avif => encode_to_avif(image),

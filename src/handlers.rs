@@ -103,7 +103,20 @@ async fn store_variants(state: &AppState, slug: &Slug, image: Vec<u8>) -> Result
         }
     });
     // Waits for every format even after a failure, so no upload is cancelled midway.
-    future::join_all(uploads).await.into_iter().collect()
+    future::join_all(uploads)
+        .await
+        .into_iter()
+        .collect::<Result<(), Error>>()?;
+
+    invalidate_cdn(state, slug).await;
+    Ok(())
+}
+
+/// Drops the CDN's cached copies of `slug`, when a distribution is configured.
+async fn invalidate_cdn(state: &AppState, slug: &Slug) {
+    if let Some(cdn) = &state.cdn {
+        cdn.invalidate_product(slug).await;
+    }
 }
 
 async fn encode_and_upload(
@@ -115,9 +128,15 @@ async fn encode_and_upload(
     let data = web::block(move || format.encode(&image))
         .await?
         .map_err(internal)?;
-    s3::upload_file(&state.s3_client, &state.s3_bucket, key, data)
-        .await
-        .map_err(internal)
+    s3::upload_file(
+        &state.s3_client,
+        &state.s3_bucket,
+        key,
+        data,
+        format.mime_type(),
+    )
+    .await
+    .map_err(internal)
 }
 
 struct ProcessedImage {
@@ -280,12 +299,14 @@ pub(crate) async fn delete_image(
         .collect::<anyhow::Result<()>>()
         .map_err(internal)?;
 
+    invalidate_cdn(&state, &slug).await;
     Ok(HttpResponse::NoContent().finish())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cdn;
     use actix_web::dev::ServiceResponse;
     use actix_web::error::PayloadError;
     use actix_web::http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -343,6 +364,55 @@ mod tests {
         body
     }
 
+    const DISTRIBUTION_ID: &str = "E2TESTDIST";
+
+    const INVALIDATION_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Invalidation xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/"><Id>I2TEST</Id><Status>InProgress</Status><CreateTime>2026-11-27T09:00:00Z</CreateTime><InvalidationBatch><Paths><Quantity>0</Quantity></Paths><CallerReference>test</CallerReference></InvalidationBatch></Invalidation>"#;
+
+    /// A CloudFront stand-in answering `status` to invalidations of [`DISTRIBUTION_ID`].
+    async fn mock_cdn(status: u16, expected_calls: u64) -> MockServer {
+        let cdn = MockServer::start().await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path(format!(
+                "/2020-05-31/distribution/{DISTRIBUTION_ID}/invalidation"
+            )))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_body_string(INVALIDATION_XML)
+                    .insert_header("Content-Type", "text/xml"),
+            )
+            .expect(expected_calls)
+            .mount(&cdn)
+            .await;
+        cdn
+    }
+
+    fn with_cdn(mut state: AppState, cdn_server: &MockServer) -> AppState {
+        let client = aws_sdk_cloudfront::Client::from_conf(
+            aws_sdk_cloudfront::Config::builder()
+                .credentials_provider(aws_sdk_cloudfront::config::Credentials::new(
+                    "test", "test", None, None, "test",
+                ))
+                .region(aws_sdk_cloudfront::config::Region::new("us-east-1"))
+                .endpoint_url(cdn_server.uri())
+                .retry_config(aws_sdk_cloudfront::config::retry::RetryConfig::disabled())
+                .behavior_version_latest()
+                .build(),
+        );
+        state.cdn = Some(cdn::Invalidator::new(client, DISTRIBUTION_ID.into()));
+        state
+    }
+
+    /// The invalidation paths the CDN stand-in received, in order.
+    async fn invalidated_paths(cdn: &MockServer) -> Vec<String> {
+        let requests = cdn.received_requests().await.unwrap();
+        let body = String::from_utf8(requests[0].body.clone()).unwrap();
+        body.split("<Path>")
+            .skip(1)
+            .map(|rest| rest.split("</Path>").next().unwrap().to_owned())
+            .collect()
+    }
+
     fn app_state(s3_server: &MockServer, rembg_server: Option<&MockServer>) -> AppState {
         let s3_client = aws_sdk_s3::Client::from_conf(
             aws_sdk_s3::Config::builder()
@@ -359,6 +429,7 @@ mod tests {
             rembg_url: rembg_server.map(MockServer::uri),
             trim_transparent: true,
             http_client: reqwest::Client::new(),
+            cdn: None,
         }
     }
 
@@ -470,6 +541,93 @@ mod tests {
             "Images uploaded successfully"
         );
         assert_eq!(requested_keys(&s3).await, all_variant_keys("my-product"));
+    }
+
+    #[actix_web::test]
+    async fn upload_stores_each_variant_with_its_content_type_and_cache_control() {
+        let s3 = mock_s3(6).await;
+        let body = multipart_body(Some("my-product"), Some(&opaque_png(20, 20)));
+
+        let response = post_multipart(app_state(&s3, None), "/upload", body).await;
+
+        assert_eq!(response.status(), 200);
+        for request in s3.received_requests().await.unwrap() {
+            let path = request.url.path();
+            let expected = match path.rsplit('.').next() {
+                Some("avif") => "image/avif",
+                Some("webp") => "image/webp",
+                Some("png") => "image/png",
+                other => panic!("unexpected extension {other:?}"),
+            };
+            let header = |name: &str| request.headers.get(name).unwrap().to_str().unwrap();
+            assert_eq!(header("content-type"), expected, "{path}");
+            assert_eq!(header("cache-control"), s3::CACHE_CONTROL, "{path}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn upload_routes_invalidate_the_product_on_the_cdn() {
+        for uri in ["/upload", "/images/upload/processed"] {
+            let s3 = mock_s3(6).await;
+            let rembg = mock_rembg(png_response(cutout_png()), u64::from(uri != "/upload")).await;
+            let cdn = mock_cdn(201, 1).await;
+            let body = multipart_body(Some("my-product"), Some(&opaque_png(20, 20)));
+
+            let state = with_cdn(app_state(&s3, Some(&rembg)), &cdn);
+            let response = post_multipart(state, uri, body).await;
+
+            assert_eq!(response.status(), 200, "{uri}");
+            assert_eq!(
+                invalidated_paths(&cdn).await,
+                ["/images/my-product.*", "/images/thumbnails/my-product.*"],
+                "{uri}"
+            );
+            cdn.verify().await;
+        }
+    }
+
+    #[actix_web::test]
+    async fn a_failed_invalidation_does_not_fail_the_upload() {
+        let s3 = mock_s3(6).await;
+        let cdn = mock_cdn(500, 1).await;
+        let body = multipart_body(Some("my-product"), Some(&opaque_png(20, 20)));
+
+        let response = post_multipart(with_cdn(app_state(&s3, None), &cdn), "/upload", body).await;
+
+        assert_eq!(response.status(), 200);
+        cdn.verify().await;
+    }
+
+    #[actix_web::test]
+    async fn a_failed_upload_invalidates_nothing() {
+        let s3 = MockServer::start().await;
+        Mock::given(matchers::method("PUT"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&s3)
+            .await;
+        let cdn = mock_cdn(201, 0).await;
+        let body = multipart_body(Some("my-product"), Some(&opaque_png(20, 20)));
+
+        let response = post_multipart(with_cdn(app_state(&s3, None), &cdn), "/upload", body).await;
+
+        assert_eq!(response.status(), 500);
+        cdn.verify().await;
+    }
+
+    #[actix_web::test]
+    async fn delete_invalidates_the_product_on_the_cdn() {
+        let s3 = mock_s3_delete(204, 6).await;
+        let cdn = mock_cdn(201, 1).await;
+
+        let state = with_cdn(app_state(&s3, None), &cdn);
+        let response = delete_request(state, "/delete/my-product").await;
+
+        assert_eq!(response.status(), 204);
+        assert_eq!(
+            invalidated_paths(&cdn).await,
+            ["/images/my-product.*", "/images/thumbnails/my-product.*"]
+        );
+        cdn.verify().await;
     }
 
     #[actix_web::test]
